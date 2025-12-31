@@ -1,6 +1,0 @@
-streamlit
-pandas
-plotly
-numpy
-python-dotenv
-streamlit-cookies-controller
