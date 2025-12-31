@@ -32,7 +32,7 @@ def login():
 
         # ให้เวลาคุกกี้ถูกส่งไปที่ browser ก่อน
         time.sleep(0.2)
-        st.rerun()
+        #st.rerun()
     else:
         st.error("❌ รหัสผ่านไม่ถูกต้อง")
 
@@ -40,7 +40,7 @@ def logout():
     st.session_state.authenticated = False
     cookies.remove("authenticated")
     time.sleep(0.2)
-    st.rerun()
+    #st.rerun()
 
 if not st.session_state.authenticated:
     st.title("🔐 กรุณาใส่รหัสผ่าน")
@@ -54,29 +54,41 @@ st.button("Logout", on_click=logout)
 # ตั้งค่าหน้าเว็บ
 
 # ===================== CACHE FUNCTIONS =====================
-@st.cache_data(ttl=300)  # Cache 5 นาที
+@st.cache_data(ttl=10)  # Cache 5 นาที
 def read_google_sheet(sheet_id: str, sheet_name: str) -> pd.DataFrame:
     """อ่านข้อมูลจาก Google Sheet พร้อม cache"""
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={quote(sheet_name)}"
     df = pd.read_csv(url)
     return df.dropna(how="all")
 
-@st.cache_data
+@st.cache_data(ttl=10)
 def preprocess_data(_ap_score, _ar_risk, _ap_bill, _ar_bill):
-    """ประมวลผลข้อมูลเบื้องต้นพร้อม cache"""
-    # แปลง Due เป็นตัวเลข
+
     _ap_bill['Due'] = pd.to_numeric(_ap_bill['Due'], errors='coerce')
     _ar_bill['Due'] = pd.to_numeric(_ar_bill['Due'], errors='coerce')
-    
-    # แปลงวันที่ครั้งเดียว
-    date_cols = ['Date', 'Due date']
+
+    date_cols = ['Date', 'Due date', 'วันที่รับเงินจริง', 'วันที่จ่ายจริง']
+
     for col in date_cols:
-        _ap_bill[col] = pd.to_datetime(_ap_bill[col], errors='coerce')
-        _ar_bill[col] = pd.to_datetime(_ar_bill[col], errors='coerce')
-    
+        if col in _ap_bill.columns:
+            _ap_bill[col] = pd.to_datetime(
+                _ap_bill[col],
+                dayfirst=True,
+                errors='coerce'
+            )
+
+        if col in _ar_bill.columns:
+            _ar_bill[col] = pd.to_datetime(
+                _ar_bill[col],
+                dayfirst=True,
+                errors='coerce'
+            )
+
     return _ap_score, _ar_risk, _ap_bill, _ar_bill
 
-@st.cache_data
+
+
+@st.cache_data(ttl=10)
 def calculate_scores(_ap_score, scenario_weights):
     """คำนวณคะแนนพร้อม cache"""
     df = _ap_score.copy()
@@ -92,12 +104,13 @@ ap_Score = read_google_sheet(sheet_id, "AP (SCORE)")
 ar_Risk = read_google_sheet(sheet_id, "AR (SCORE)")
 plan_cashflow_ap = read_google_sheet(sheet_id, "AP(BILL)")
 plan_cashflow_ar = read_google_sheet(sheet_id, "AR(BILL)")
-
+if ap_Score.empty or ar_Risk.empty or plan_cashflow_ap.empty or plan_cashflow_ar.empty:
+    st.error("❌ ไม่สามารถโหลดข้อมูลได้ กรุณาตรวจสอบ Google Sheet")
+    st.stop()
 # ประมวลผลข้อมูล
 ap_Score, ar_Risk, plan_cashflow_ap, plan_cashflow_ar = preprocess_data(
     ap_Score, ar_Risk, plan_cashflow_ap, plan_cashflow_ar
 )
-
 # ===================== SIDEBAR =====================
 st.sidebar.header("⚙️ การตั้งค่าหลัก")
 
@@ -317,11 +330,12 @@ st.markdown("---")
 df_cash = calculate_daily_cashflow(df_dates, plan_cashflow_ap, plan_cashflow_ar, เงินสดยกมา, Short_term_loan)
 
 # Tab Navigation
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 ภาพรวมกระแสเงินสด",
     "⚠️ ความเสี่ยงด้านลูกหนี้",
     "💡 คำแนะนำการเลื่อนเจ้าหนี้",
-    "📈 เปรียบเทียบผลลัพธ์"
+    "📈 เปรียบเทียบผลลัพธ์",
+    "💰 ภาพรวม AR/AP DAYS"
 ])
 
 with tab1:
@@ -596,3 +610,112 @@ with tab4:
         st.plotly_chart(fig, use_container_width=True)
 
         st.info("ไม่พบรายการที่ต้องปรับปรุงตามเกณฑ์ที่กำหนด")
+
+with tab5:
+    st.subheader("💰 ภาพรวม AR/AP DAYS")
+    
+    # =============== AP Analysis ===============
+    # แปลงวันที่เป็น datetime และจัดการค่า null
+    plan_cashflow_ap['วันที่จ่ายจริง'] = pd.to_datetime(
+        plan_cashflow_ap['วันที่จ่ายจริง'], 
+        errors='coerce'
+    )
+    plan_cashflow_ap['Date'] = pd.to_datetime(
+        plan_cashflow_ap['Date'], 
+        errors='coerce'
+    )
+    
+    # กรองเฉพาะแถวที่มีข้อมูลครบถ้วน
+    ap_valid = plan_cashflow_ap.dropna(subset=['วันที่จ่ายจริง', 'Date', 'From'])
+    
+    # คำนวณจำนวนวันล่าช้า
+    ap_valid['delay_days'] = (
+        ap_valid['วันที่จ่ายจริง'] - ap_valid['Date']
+    ).dt.days
+    
+    # คำนวณค่าเฉลี่ยความล่าช้าตาม From
+    avg_delay_by_from = (
+        ap_valid
+        .groupby('From', as_index=False)['delay_days']
+        .agg(['mean', 'count'])
+        .reset_index()
+        .rename(columns={'mean': 'avg_delay_days', 'count': 'transactions'})
+        .assign(avg_delay_days=lambda x: np.ceil(x['avg_delay_days']).astype(int))
+        .sort_values(by='avg_delay_days', ascending=False)
+    )
+    
+    # =============== AR Analysis ===============
+    # แปลงวันที่เป็น datetime และจัดการค่า null
+    plan_cashflow_ar['วันที่รับเงินจริง'] = pd.to_datetime(
+    plan_cashflow_ar['วันที่รับเงินจริง'],
+    dayfirst=True,
+    errors='coerce'
+    )
+    
+    plan_cashflow_ar['Date'] = pd.to_datetime(
+        plan_cashflow_ar['Date'],
+        format='%d/%m/%Y',
+        errors='coerce'
+    )
+    # กรองเฉพาะแถวที่มีข้อมูลครบถ้วน
+    ar_valid = plan_cashflow_ar.dropna(subset=['วันที่รับเงินจริง', 'Date', 'From'])
+    
+    # คำนวณจำนวนวันล่าช้า
+    ar_valid['delay_days'] = (
+        ar_valid['วันที่รับเงินจริง'] - ar_valid['Date']
+    ).dt.days
+    # คำนวณค่าเฉลี่ยความล่าช้าตาม From
+    avg_delay_ar_by_from = (
+        ar_valid
+        .groupby('From', as_index=False)['delay_days']
+        .agg(['mean', 'count'])
+        .reset_index()
+        .rename(columns={'mean': 'avg_delay_days', 'count': 'transactions'})
+        .assign(avg_delay_days=lambda x: np.ceil(x['avg_delay_days']).astype(int))
+        .sort_values(by='avg_delay_days', ascending=False)
+    )
+    
+    # =============== Display in 2 Columns ===============
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 💸 เจ้าหนี้การค้า (AP)")
+        st.markdown(f"**จำนวนรายการทั้งหมด:** {len(ap_valid):,}")
+        st.markdown(f"**ค่าเฉลี่ยความล่าช้าโดยรวม:** {ap_valid['delay_days'].mean():.1f} วัน")
+        st.dataframe(
+            avg_delay_by_from,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "From": "ผู้ขาย/เจ้าหนี้",
+                "avg_delay_days": st.column_config.NumberColumn(
+                    "ค่าเฉลี่ยวันล่าช้า",
+                    format="%d วัน"
+                ),
+                "transactions": st.column_config.NumberColumn(
+                    "จำนวนรายการ",
+                    format="%d"
+                )
+            }
+        )
+    
+    with col2:
+        st.markdown("### 💰 ลูกหนี้การค้า (AR)")
+        st.markdown(f"**จำนวนรายการทั้งหมด:** {len(ar_valid):,}")
+        st.markdown(f"**ค่าเฉลี่ยความล่าช้าโดยรวม:** {ar_valid['delay_days'].mean():.1f} วัน")
+        st.dataframe(
+            avg_delay_ar_by_from,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "From": "ลูกค้า/ลูกหนี้",
+                "avg_delay_days": st.column_config.NumberColumn(
+                    "ค่าเฉลี่ยวันล่าช้า",
+                    format="%d วัน"
+                ),
+                "transactions": st.column_config.NumberColumn(
+                    "จำนวนรายการ",
+                    format="%d"
+                )
+            }
+        )
